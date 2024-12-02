@@ -40,7 +40,7 @@ void pack_asset_file(const char* asset_path, const char* asset_id, FILE* out_fil
 
 	fclose(file);
 
-	printf("Asset(\"%s\", %i, %i),\n", asset_id, *current_pos, current_size);
+	printf("Asset::make(\"%s\", %i, %i),\n", asset_id, *current_pos, current_size);
 	
 	*current_pos += current_size;
 	*asset_count += 1;
