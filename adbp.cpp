@@ -1,110 +1,80 @@
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <cstdarg>
-#include <cerrno>
-#include <dirent.h>
-#include <sys/stat.h>
+#include <ctk-0.19/ctk.cpp>
 
 void panic(const char* format, ...) {
 	va_list args;
 	va_start(args, format);
-	vfprintf(stderr, format, args);
+	std::vfprintf(stderr, format, args);
 	va_end(args);
-	exit(1);
+	std::exit(1);
 }
 
-void pack_asset_file(const char* asset_path, const char* asset_id, FILE* out_file, int* current_pos, int* asset_count) {
-	FILE* file = fopen(asset_path, "rb");
-	if (!file) {
-		panic("Failed to open file '%s': %s\n", asset_path, strerror(errno));
-	}
+struct ADBP {
+	std::FILE* out_file;
+	size_t current_pos;
+	size_t asset_count;
 
-	const size_t buffer_size = 1024 * 1024;
-	char buffer[buffer_size];
-
-	int current_size = 0;
-	size_t bytes_read;
-	while ((bytes_read = fread(buffer, 1, buffer_size, file)) > 0) {
-		current_size += bytes_read;
-		if (fwrite(buffer, 1, bytes_read, out_file) != bytes_read) {
-			fclose(file);
-			panic("Failed to write to output file");
+	void create(const char* out_path) {
+		this->out_file = std::fopen(out_path, "wb");
+		if (this->out_file == nullptr) {
+			panic("failed to open output file");
 		}
+		this->current_pos = 0;
+		this->asset_count = 0;
 	}
 
-	if (ferror(file)) {
-		fclose(file);
-		panic("Error reading file '%s'\n", asset_path);
+	void destroy() {
+		std::fclose(this->out_file);
 	}
 
-	fclose(file);
-
-	printf("Asset::make(\"%s\", %i, %i),\n", asset_id, *current_pos, current_size);
-	
-	*current_pos += current_size;
-	*asset_count += 1;
-}
-
-void pack_assets_dir(const char* dir_path, const char* asset_id, FILE* out_file, int* current_pos, int* asset_count) {
-	DIR* dir = opendir(dir_path);
-	if (!dir) {
-		panic("Failed to open directory '%s': %s\n", dir_path, strerror(errno));
-	}
-
-	struct dirent* entry;
-	while ((entry = readdir(dir)) != NULL) {
-		// Skip '.' and '..'
-		if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
-			continue;
+	void pack_assets_dir(const char* dir_path, const char* asset_id) {
+		ctk::Directory dir;
+		dir.create(dir_path);
+		while (true) {
+			ctk::Directory::Entity ent = dir.get_next(true);
+			if (ent.type == ctk::Directory::Entity::Type::None) {
+				break;
+			}
+			ctk::ar<u8> file_path = ctk::alloc_format("%s/%s", dir_path, ent.path);
+			ctk::ar<u8> new_asset_id;
+			if (asset_id == nullptr) {
+				new_asset_id = ctk::alloc_format("%s", ent.path);
+			} else {
+				new_asset_id = ctk::alloc_format("%s/%s", asset_id, ent.path);
+			}
+			for (size_t a = 0; a < new_asset_id.len; ++a) {
+				if (new_asset_id[a] == '.') {
+					new_asset_id[a] = '_';
+				}
+			}
+			if (ent.type == ctk::Directory::Entity::Type::Dir) {
+				this->pack_assets_dir((const char*)file_path.buf, (const char*)new_asset_id.buf);
+			} else {
+				this->pack_asset_file((const char*)file_path.buf, (const char*)new_asset_id.buf);
+			}
+			file_path.destroy();
+			new_asset_id.destroy();
 		}
-
-		// Build the new file path
-		char file_path[PATH_MAX];
-		snprintf(file_path, sizeof(file_path), "%s/%s", dir_path, entry->d_name);
-
-		// Build the asset ID
-		char new_asset_id[PATH_MAX];
-		if (asset_id == NULL) {
-			snprintf(new_asset_id, sizeof(new_asset_id), "%s", entry->d_name);
-		} else {
-			snprintf(new_asset_id, sizeof(new_asset_id), "%s/%s", asset_id, entry->d_name);
-		}
-
-		struct stat path_stat;
-		stat(file_path, &path_stat);
-
-		if (S_ISDIR(path_stat.st_mode)) {
-			pack_assets_dir(file_path, new_asset_id, out_file, current_pos, asset_count);
-		} else {
-			pack_asset_file(file_path, new_asset_id, out_file, current_pos, asset_count);
-		}
-	}
-	closedir(dir);
-}
-
-void pack_assets(const char* assets_path, const char* out_path) {
-	FILE* out_file = fopen(out_path, "wb");
-	if (!out_file) {
-		if (out_file) fclose(out_file);
-		panic("Failed to open output file");
+		dir.destroy();
 	}
 
-	printf("const Asset asset_list[] = {\n");
-
-	int current_pos = 0;
-	int asset_count = 0;
-	pack_assets_dir(assets_path, NULL, out_file, &current_pos, &asset_count);
-
-	printf("};\nconstexpr size_t asset_count = %i;", asset_count);
-
-	fclose(out_file);
-}
+	void pack_asset_file(const char* asset_path, const char* asset_id) {
+		ctk::ar<u8> asset_data = ctk::load_file(asset_path);
+		if (std::fwrite(asset_data.buf, 1, asset_data.len, out_file) != asset_data.len) {
+			panic("failed to write to output file");
+		}
+		std::printf("static ctk::ar<const u8> %s = ctk::ar<const u8>(&_binary_temp_assets_bin_start[%zu], %zu);\n", asset_id, current_pos, asset_data.len);
+		this->current_pos += asset_data.len;
+		this->asset_count += 1;
+	}
+};
 
 int main(int argc, char** argv) {
 	if (argc != 3) {
 		panic("expected 2 args");
 	}
-	pack_assets(argv[1], argv[2]);
+	ADBP adbp;
+	adbp.create(argv[2]);
+	adbp.pack_assets_dir(argv[1], nullptr);
+	adbp.destroy();
 	return 0;
 }
